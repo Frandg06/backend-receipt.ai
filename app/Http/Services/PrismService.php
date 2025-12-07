@@ -17,6 +17,9 @@ class PrismService
                 'Analyze this ticket:',
                 [Image::fromBase64(base64: $base64img)]
             )
+            ->withClientOptions([
+                'timeout' => 3000,
+            ])
             ->asText()
             ->text;
 
