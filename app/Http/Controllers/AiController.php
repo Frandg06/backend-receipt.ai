@@ -4,13 +4,14 @@ namespace App\Http\Controllers;
 
 use App\DataObjects\TicketData;
 use App\Services\GroqService;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Pest\Support\Str;
 
 class AiController extends Controller
 {
-    public function __invoke(Request $request, GroqService $groqService)
+    public function __invoke(Request $request, GroqService $groqService): JsonResponse
     {
         $validated = $request->validate([
             'img' => 'required|image|max:2048|mimes:jpeg,png,jpg',
