@@ -1,39 +1,114 @@
 <?php
-namespace App\Http\Services;
 
-use Prism\Prism\Enums\Provider;
-use Prism\Prism\Facades\Prism;
-use Prism\Prism\ValueObjects\Media\Image;
+namespace App\Services;
+
+use App\DataObjects\TicketData;
+use App\Exceptions\GroqServiceException;
+use Illuminate\Http\Client\Factory;
 use Illuminate\Support\Facades\Log;
 
-class PrismService
+final readonly class GroqService
 {
-    public function sendImageToAi(string $base64img): array
-    {
-        $response = Prism::text()
-            ->using(Provider::OpenAI, 'gpt-4o-mini')
-            ->withSystemPrompt($this->getPromp())
-            ->withPrompt(
-                'Analyze this ticket:',
-                [Image::fromBase64(base64: $base64img)]
-            )
-            ->withClientOptions([
-                'timeout' => 3000,
-            ])
-            ->asText()
-            ->text;
-
-        $json = json_decode($response, true);
-
-        Log::info(['Parsed AI response.', 'json' => $json]);
-
-        return $json;
+    public function __construct(
+        private Factory $http,
+    ) {
     }
 
-    private function getPromp(): string
+    public function parseTicket(string $imageUrl): array
     {
-        return '
-        Eres TicketParserGPT, un asistente especializado en convertir tickets o facturas en un JSON estructurado.
+        $response = $this->makeRequest($imageUrl);
+
+        $this->validateResponse($response);
+
+        $content = $this->extractContent($response);
+
+        return $this->parseJsonContent($content);
+    }
+
+    private function makeRequest(string $imageUrl): array
+    {
+        $response = $this->http->withToken($this->apiKey())
+            ->timeout($this->timeout())
+            ->retry($this->maxRetries(), 1000)
+            ->post($this->endpoint(), $this->buildPayload($imageUrl));
+
+        if ($response->failed()) {
+            Log::error('Groq API Error', [
+                'status' => $response->status(),
+                'body' => $response->body(),
+            ]);
+
+            throw GroqServiceException::connectionFailed(
+                $response->status(),
+                $response->body()
+            );
+        }
+
+        return $response->json();
+    }
+
+    private function validateResponse(array $response): void
+    {
+        if (! isset($response['choices'][0]['message']['content'])) {
+            Log::error('Groq API Invalid Response', ['response' => $response]);
+
+            throw GroqServiceException::emptyResponse();
+        }
+    }
+
+    private function extractContent(array $response): string
+    {
+        return $response['choices'][0]['message']['content'];
+    }
+
+    private function parseJsonContent(string $content): array
+    {
+        $data = json_decode($content, true);
+
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            Log::error('JSON Parse Error', ['content' => $content]);
+
+            throw GroqServiceException::invalidJson($content);
+        }
+
+        return $data;
+    }
+
+    private function buildPayload(string $imageUrl): array
+    {
+        return [
+            'model' => config('groq.model'),
+            'messages' => [
+                [
+                    'role' => 'system',
+                    'content' => $this->systemPrompt(),
+                ],
+                [
+                    'role' => 'user',
+                    'content' => [
+                        [
+                            'type' => 'text',
+                            'text' => 'Por favor, procesa esta imagen y extrae los datos.',
+                        ],
+                        [
+                            'type' => 'image_url',
+                            'image_url' => [
+                                'url' => $imageUrl,
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+            'temperature' => config('groq.temperature'),
+            'stream' => false,
+            'response_format' => ['type' => 'json_object'],
+        ];
+    }
+
+    private function systemPrompt(): string
+    {
+        return <<<'EOT'
+            Eres TicketParserGPT, un asistente especializado en convertir tickets o facturas en un JSON estructurado.
             ━━━━━━━━━━
             FLUJO GENERAL
             1. **Entrada posible**  
@@ -47,7 +122,7 @@ class PrismService
             3. **Extracción y formateo**  
             - Si es válido, identifica \`nombre\`, \`total\` y la lista de productos.  
             - Si el nombre crees que no concuerda con un producto o servicio real cambialo a el nombre que creas que puyede encajar.
-            - Devuelve un **único** JSON con la estructura indicada en “DETALLES DE CADA CAMPO”.  
+            - Devuelve un **único** JSON con la estructura indicada en "DETALLES DE CADA CAMPO".  
             ━━━━━━━━━━
             DETALLES DE CADA CAMPO
             • \`nombre\`    (string)  → Nombre o razón social del comercio (sin NIF).  
@@ -126,8 +201,33 @@ class PrismService
                 }
             }
         
-        ';
-
+        '
+        EOT;
     }
 
+    private function apiKey(): string
+    {
+        $apiKey = config('groq.api_key');
+
+        if (empty($apiKey)) {
+            throw GroqServiceException::invalidApiKey();
+        }
+
+        return $apiKey;
+    }
+
+    private function endpoint(): string
+    {
+        return config('groq.base_url').'/chat/completions';
+    }
+
+    private function timeout(): int
+    {
+        return config('groq.timeout');
+    }
+
+    private function maxRetries(): int
+    {
+        return config('groq.max_retries');
+    }
 }
